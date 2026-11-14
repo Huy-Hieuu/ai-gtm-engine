@@ -7,7 +7,7 @@
 import argparse
 import sys
 
-from app import ghl
+from app import db, ghl
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -18,6 +18,7 @@ def main(argv: list[str] | None = None) -> None:
     sms.add_argument("contact_id")
     sms.add_argument("text")
     args = parser.parse_args(argv)
+    db.init()  # an OAuth install, if any, takes precedence over the Private Integration Token
 
     try:
         if args.command == "contacts":

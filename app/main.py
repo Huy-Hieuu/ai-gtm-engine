@@ -3,8 +3,9 @@ import logging
 from contextlib import asynccontextmanager
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
+from fastapi.responses import RedirectResponse
 
-from app import db, webhooks
+from app import db, ghl, webhooks
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("app.main")
@@ -22,6 +23,27 @@ app = FastAPI(title="GHL Speed-to-Lead", lifespan=lifespan)
 @app.get("/health")
 def health() -> dict:
     return {"status": "ok"}
+
+
+@app.get("/oauth/install")
+def oauth_install() -> RedirectResponse:
+    """Send the agency admin to GHL to pick a sub-account and approve the scopes."""
+    try:
+        return RedirectResponse(ghl.install_url())
+    except ghl.GHLError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/oauth/callback")
+def oauth_callback(code: str) -> dict:
+    """GHL lands here after consent with `?code=`; swap it for tokens and save the install."""
+    try:
+        location_id = ghl.exchange_code(code)
+    except ghl.GHLError as e:
+        log.warning("oauth install failed: %s", e)
+        raise HTTPException(status_code=502, detail=str(e))
+    log.info("oauth installed location=%s", location_id)
+    return {"status": "installed", "locationId": location_id}
 
 
 @app.post("/webhook")
