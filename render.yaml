@@ -1,7 +1,7 @@
 # One free Render web service. Free-tier disk is temporary: the SQLite file resets on every deploy.
 services:
   - type: web
-    name: ghl-speed-to-lead
+    name: ai-gtm-engine
     runtime: python
     plan: free
     buildCommand: pip install -r requirements.txt
