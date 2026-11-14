@@ -1,22 +1,114 @@
 """GoHighLevel API client. Every GHL call lives here, one small function each."""
 
+import threading
+from datetime import datetime, timedelta, timezone
+from urllib.parse import urlencode
+
 import httpx
 
-from app import config
+from app import config, db
 
 # `Version` header value the endpoint docs require.
 API_VERSION = "v3"
+
+# https://marketplace.gohighlevel.com/docs/oauth/Authorization (standard, not white-label)
+INSTALL_URL = "https://marketplace.gohighlevel.com/v2/oauth/chooselocation"
+
+# What the app asks for at install. Each endpoint's doc page names the scope it needs.
+SCOPES = [
+    "contacts.readonly",  # POST /contacts/search, ContactCreate webhook
+    "conversations/message.readonly",  # InboundMessage webhook
+    "conversations/message.write",  # POST /conversations/messages
+    "calendars.readonly",  # GET /calendars/{calendarId}/free-slots
+    "calendars/events.write",  # POST /calendars/events/appointments
+    "opportunities.readonly",  # GET /opportunities/pipelines
+    "opportunities.write",  # PUT /opportunities/{id}
+]
+
+# Refresh an OAuth access token this long before it expires (it lives ~24 h).
+REFRESH_MARGIN = timedelta(minutes=5)
+
+# A refresh token is single-use: never refresh the same install twice at once.
+_refresh_lock = threading.Lock()
 
 
 class GHLError(Exception):
     """A GHL call failed; the message says why."""
 
 
-def get_access_token(location_id: str) -> str:
-    """Token for a location. Private Integration Token for now; OAuth replaces this in S5."""
-    if not config.GHL_PRIVATE_TOKEN:
-        raise GHLError("GHL_PRIVATE_TOKEN is not set: copy .env.example to .env and fill it in")
-    return config.GHL_PRIVATE_TOKEN
+def install_url() -> str:
+    """Where an agency admin goes to pick a sub-account and approve the scopes."""
+    if not (config.GHL_CLIENT_ID and config.GHL_REDIRECT_URI):
+        raise GHLError("GHL_CLIENT_ID and GHL_REDIRECT_URI must be set: see README Step 5")
+    query = {
+        "response_type": "code",
+        "redirect_uri": config.GHL_REDIRECT_URI,
+        "client_id": config.GHL_CLIENT_ID,
+        "scope": " ".join(SCOPES),
+    }
+    return f"{INSTALL_URL}?{urlencode(query)}"
+
+
+# https://marketplace.gohighlevel.com/docs/ghl/oauth/get-access-token
+def _token_request(form: dict) -> dict:
+    """Call the token endpoint and save the tokens it returns. Returns GHL's JSON."""
+    if not (config.GHL_CLIENT_ID and config.GHL_CLIENT_SECRET):
+        raise GHLError("GHL_CLIENT_ID and GHL_CLIENT_SECRET must be set: see README Step 5")
+    resp = httpx.post(
+        config.GHL_API_BASE + "/oauth/token",
+        headers={"Version": API_VERSION, "Accept": "application/json"},
+        data={
+            "client_id": config.GHL_CLIENT_ID,
+            "client_secret": config.GHL_CLIENT_SECRET,
+            "user_type": "Location",
+            **form,
+        },
+        timeout=30,
+    )
+    if resp.is_error:
+        raise GHLError(f"GHL /oauth/token failed ({resp.status_code}): {resp.text}")
+    data = resp.json()
+    if not data.get("locationId"):
+        raise GHLError("GHL /oauth/token returned no locationId: install the app into a sub-account")
+    expires_at = datetime.now(timezone.utc) + timedelta(seconds=data["expires_in"])
+    db.save_install(data["locationId"], data["access_token"], data["refresh_token"], expires_at)
+    return data
+
+
+def exchange_code(code: str) -> str:
+    """Finish an install: swap the `?code=` GHL sent to the callback for tokens. Returns the location id."""
+    data = _token_request(
+        {"grant_type": "authorization_code", "code": code, "redirect_uri": config.GHL_REDIRECT_URI}
+    )
+    return data["locationId"]
+
+
+def get_access_token(location_id: str, stale: str | None = None) -> str:
+    """Token for a location: its OAuth install if there is one, else the Private Integration Token.
+
+    The OAuth token is refreshed when it expires within REFRESH_MARGIN, or when it equals
+    `stale` (a token GHL just rejected with 401).
+    """
+    install = db.get_install(location_id)
+    if install is None:
+        if not config.GHL_PRIVATE_TOKEN:
+            raise GHLError(
+                "GHL_PRIVATE_TOKEN is not set and the OAuth app is not installed for this location: "
+                "copy .env.example to .env and fill it in"
+            )
+        return config.GHL_PRIVATE_TOKEN
+
+    def fresh(i: dict) -> bool:
+        return i["access_token"] != stale and i["expires_at"] - datetime.now(timezone.utc) > REFRESH_MARGIN
+
+    if fresh(install):
+        return install["access_token"]
+    with _refresh_lock:
+        install = db.get_install(location_id)  # another call may have refreshed meanwhile
+        if fresh(install):
+            return install["access_token"]
+        data = _token_request({"grant_type": "refresh_token", "refresh_token": install["refresh_token"]})
+        return data["access_token"]
 
 
 def _location_id() -> str:
@@ -26,20 +118,30 @@ def _location_id() -> str:
 
 
 def _post(path: str, body: dict) -> dict:
-    headers = {
-        "Authorization": f"Bearer {get_access_token(_location_id())}",
-        "Version": API_VERSION,
-        "Accept": "application/json",
-    }
-    resp = httpx.post(config.GHL_API_BASE + path, headers=headers, json=body, timeout=30)
+    location_id = _location_id()
+    token = get_access_token(location_id)
+    resp = _send(path, body, token)
+    if resp.status_code == 401 and db.get_install(location_id):
+        # GHL may revoke a token before its expiry: refresh once, retry once.
+        resp = _send(path, body, get_access_token(location_id, stale=token))
     if resp.status_code == 401:
         raise GHLError(
             f"GHL rejected the token (401 on {path}): {resp.text}. "
-            "Check GHL_PRIVATE_TOKEN and that the token has the scope this call needs."
+            "Check GHL_PRIVATE_TOKEN (or reinstall the OAuth app) and that the token has the scope "
+            "this call needs."
         )
     if resp.is_error:
         raise GHLError(f"GHL {path} failed ({resp.status_code}): {resp.text}")
     return resp.json()
+
+
+def _send(path: str, body: dict, token: str) -> httpx.Response:
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Version": API_VERSION,
+        "Accept": "application/json",
+    }
+    return httpx.post(config.GHL_API_BASE + path, headers=headers, json=body, timeout=30)
 
 
 # https://marketplace.gohighlevel.com/docs/ghl/contacts/search-contacts-advanced

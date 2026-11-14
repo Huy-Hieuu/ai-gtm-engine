@@ -5,7 +5,7 @@ import httpx
 import pytest
 import respx
 
-from app import config, ghl, hello
+from app import config, db, ghl, hello
 
 FIXTURES = Path(__file__).parent / "fixtures"
 BASE = "https://ghl.test"
@@ -16,10 +16,12 @@ def fixture(name: str) -> dict:
 
 
 @pytest.fixture(autouse=True)
-def env(monkeypatch):
+def env(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "GHL_PRIVATE_TOKEN", "pit-test-token")
     monkeypatch.setattr(config, "GHL_LOCATION_ID", "loc123")
     monkeypatch.setattr(config, "GHL_API_BASE", BASE)
+    monkeypatch.setattr(config, "DATABASE_PATH", str(tmp_path / "test.db"))
+    db.init()
 
 
 def assert_ghl_headers(request: httpx.Request) -> None:
