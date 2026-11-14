@@ -1,0 +1,16 @@
+{
+  "calendarId": "CVokAlI8fgw4WYWoCtQz",
+  "locationId": "C2QujeCh8ZnC7al2InWR",
+  "contactId": "0007BWpSzSwfiuSl0tR2",
+  "startTime": "2021-06-23T03:30:00+05:30",
+  "endTime": "2021-06-23T04:30:00+05:30",
+  "title": "Test Event",
+  "meetingLocationType": "custom",
+  "appointmentStatus": "confirmed",
+  "assignedUserId": "0007BWpSzSwfiuSl0tR2",
+  "address": "Zoom",
+  "isRecurring": false,
+  "dateAdded": "2021-06-23T03:30:00+05:30",
+  "dateUpdated": "2021-06-23T04:30:00+05:30",
+  "id": "0TkCdp9PfvLeWKYRRvIz"
+}

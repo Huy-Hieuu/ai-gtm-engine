@@ -1,0 +1,12 @@
+{
+  "opportunity": {
+    "id": "yWQobCRIhRguQtD2llvk",
+    "name": "opportunity name",
+    "pipelineId": "bCkKGpDsyPP4peuKowkG",
+    "pipelineStageId": "7915dedc-8f18-44d5-8bc3-77c04e994a10",
+    "status": "open",
+    "contactId": "mTkSCb1UBjb5tk4OvB69",
+    "locationId": "CLu7BaljjqrEjBGKTNNe"
+  },
+  "new": false
+}

@@ -49,7 +49,7 @@ def write_reply(goal: str, first_name: str = "") -> str:
     instructions = (
         f"You text new leads for {config.BUSINESS_DESCRIPTION}. "
         "Write one SMS: friendly, plain, at most 300 characters, no emojis, no placeholders, "
-        "no promises about price or dates. Reply with the SMS text only."
+        "no promises about price or dates other than the times in the goal. Reply with the SMS text only."
     )
     lead = f"The lead's first name is {first_name}." if first_name else "The lead's name is unknown."
     return _respond(instructions, f"{lead}\nGoal of this SMS: {goal}")
@@ -89,7 +89,41 @@ def extract(question: str, text: str) -> dict:
         "unsure: true if the message is off-topic, confusing, or asks something only a human "
         "can answer (exact prices, guarantees, complaints)."
     )
-    raw = _respond(instructions, f"Our last question: {question}\nTheir reply: {text}", EXTRACT_FORMAT)
+    return _respond_json(instructions, f"Our last question: {question}\nTheir reply: {text}", EXTRACT_FORMAT)
+
+
+PICK_FORMAT = {
+    "type": "json_schema",
+    "name": "slot_pick",
+    "strict": True,
+    "schema": {
+        "type": "object",
+        "properties": {
+            "choice": {"type": ["integer", "null"]},
+            "wants_human": {"type": "boolean"},
+            "unsure": {"type": "boolean"},
+        },
+        "required": ["choice", "wants_human", "unsure"],
+        "additionalProperties": False,
+    },
+}
+
+
+def pick_slot(times: list[str], text: str) -> dict:
+    """Read which offered time a lead chose. Keys: choice (1-based number or None), wants_human, unsure."""
+    offered = "\n".join(f"{n}. {t}" for n, t in enumerate(times, 1))
+    instructions = (
+        "We offered a lead these meeting times by SMS. Read their reply.\n"
+        "choice: the number of the time they clearly accept; null if they pick none, decline all, "
+        "or it is ambiguous.\n"
+        "wants_human: true if they ask for a person, a call, or a real human.\n"
+        "unsure: true if the message is off-topic, confusing, or asks something only a human can answer."
+    )
+    return _respond_json(instructions, f"Times offered:\n{offered}\nTheir reply: {text}", PICK_FORMAT)
+
+
+def _respond_json(instructions: str, text: str, text_format: dict) -> dict:
+    raw = _respond(instructions, text, text_format)
     try:
         return json.loads(raw)
     except json.JSONDecodeError as e:

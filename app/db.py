@@ -17,7 +17,7 @@ CREATE TABLE IF NOT EXISTS events (
 );
 
 -- One row per sub-account that installed the OAuth app. Tokens are Fernet-encrypted.
--- calendar_id, pipeline_id and booked_stage_id stay NULL until Step 4 fills them.
+-- NULL calendar_id, pipeline_id or booked_stage_id: Step 4 uses the GHL_* env value instead.
 CREATE TABLE IF NOT EXISTS installs (
     location_id     TEXT PRIMARY KEY,
     access_token    TEXT NOT NULL,
@@ -39,7 +39,9 @@ CREATE TABLE IF NOT EXISTS leads (
     created_at      TEXT NOT NULL,
     last_msg_at     TEXT,              -- last question we sent; nudges count from here
     nudges          INTEGER NOT NULL DEFAULT 0,
-    last_inbound_id TEXT               -- GHL messageId of the last reply handled
+    last_inbound_id TEXT,              -- GHL messageId of the last reply handled
+    offered_slots   TEXT,              -- JSON list of the slot start times last offered (Step 4)
+    offers          INTEGER NOT NULL DEFAULT 0  -- times slots were offered
 );
 
 CREATE TABLE IF NOT EXISTS metrics (
@@ -126,7 +128,9 @@ def get_install(location_id: str) -> dict | None:
     return install
 
 
-LEAD_FIELDS = {"first_name", "state", "need", "budget", "timing", "last_msg_at", "nudges"}
+LEAD_FIELDS = {
+    "first_name", "state", "need", "budget", "timing", "last_msg_at", "nudges", "offered_slots", "offers",
+}
 METRIC_FIELDS = {"first_reply_seconds", "qualified", "booked"}
 
 

@@ -57,7 +57,7 @@ pip install -r requirements-dev.txt
 pytest -q
 ```
 
-Expected: `38 passed`.
+Expected: `49 passed`.
 
 ### 4. List contacts
 
@@ -237,7 +237,7 @@ stateDiagram-v2
 
 - **NEW**: on `ContactCreate` the agent texts a greeting with the first question at once and stores `first_reply_seconds` (contact created in GHL → SMS sent). Contacts without a phone or with Do Not Disturb on are never texted.
 - **QUALIFYING**: each reply goes to the LLM, which returns `need`, `budget`, `timing`, `fit`, `wants_human`, `unsure` as JSON. The code keeps the answers and asks the first missing one.
-- **QUALIFIED**: `on_qualified(lead)` texts "I'll send you a few times shortly". Step 4 replaces it with real slots.
+- **QUALIFIED**: `on_qualified(lead)` offers free meeting times and books the one the lead picks (Step 4). Until Step 4's calendar and pipeline ids are set, that last message fails with `GHL_CALENDAR_ID, GHL_PIPELINE_ID and GHL_BOOKED_STAGE_ID must be set`.
 - **NOT_A_FIT** / **HANDOFF**: one closing SMS, then the agent goes quiet for that contact and adds the tag `not-a-fit` or `handoff` in GHL, so a person can filter for them.
 - **NO_REPLY**: every minute the app checks for leads that have not answered: nudge 1 an hour after the last question, nudge 2 after 24 hours, each sent once. A reply puts the lead back to qualifying.
 - The same reply delivered twice (same GHL `messageId`) is answered once.
@@ -262,7 +262,7 @@ Save in Render; it redeploys. Check the tests still pass locally:
 pytest -q tests/test_agent.py
 ```
 
-Expected: `7 passed` (happy path, not a fit, handoff, nudges, duplicate reply, duplicate contact, Do Not Disturb), all with a fake LLM and fake GHL.
+Expected: `13 passed`: Step 3's happy path, not a fit, handoff, nudges, duplicate reply, duplicate contact and Do Not Disturb, plus Step 4's booking cases, all with a fake LLM and fake GHL.
 
 ### 2. Be the lead
 
@@ -275,7 +275,7 @@ Agent: Thanks! Roughly what budget do you have in mind?
 You:   around 3k
 Agent: Got it. When would you like to get started?
 You:   next month
-Agent: Thanks Jane, sounds like a great fit. I'll text you a few meeting times shortly.
+Agent: Thanks Jane, sounds like a great fit! Which time works for a quick call? 1) Mon Nov 16, 10:00 AM, 2) Mon Nov 16, 10:30 AM, 3) Tue Nov 17, 9:00 AM
 ```
 
 Render → **Logs** shows each move:
@@ -331,6 +331,146 @@ The metrics columns are `contact_id|first_reply_seconds|qualified|booked`.
 | `lead skipped contact=...: no phone or Do Not Disturb` | Give the contact a phone and turn DND off, then add a new contact. |
 | No greeting and no `app.agent` log line | The Step 2 webhook is not arriving; see Step 2's "If it fails". |
 
+## Step 4 - Book + pipeline
+
+Goal: a qualified lead gets 2-3 real free times by SMS, picks one in their own words, and ends up with an appointment on your calendar, an opportunity in the **Booked** stage, the tag `booked`, and a confirmation text.
+
+How it works (`app/agent.py`; every GHL call in `app/ghl.py`):
+
+1. **Offer.** When the third answer is in, the app asks [`GET /calendars/{calendarId}/free-slots`](https://marketplace.gohighlevel.com/docs/ghl/calendars/get-slots) for the next 7 days and texts up to 3, numbered: the earliest slot of each day first, so the lead gets a choice of days. No free slot at all → `HANDOFF`.
+2. **Pick.** The lead's reply goes to `llm.pick_slot`, which returns the number they chose (`the 2nd`, `tuesday 9 works`), none, or that they want a person. Not clear → the agent asks again with the same times, once; still not clear → `HANDOFF`. Asks for a person or off-topic → `HANDOFF`.
+3. **Book.** [`POST /calendars/events/appointments`](https://marketplace.gohighlevel.com/docs/ghl/calendars/create-appointment), status `confirmed`, the calendar's default length → `BOOKED`. If GHL refuses and the slot is no longer free (someone else took it meanwhile), the agent says sorry and offers fresh times, once; taken again → `HANDOFF`. If GHL refuses while the slot is still free, that is a real error and shows as `webhook failed` in the log.
+4. **Pipeline.** [`POST /opportunities/upsert`](https://marketplace.gohighlevel.com/docs/ghl/opportunities/upsert-opportunity) with the contact, pipeline and Booked stage: GHL moves the contact's latest opportunity in that pipeline to Booked, or creates one. Then the tag `booked`, the confirmation SMS, `DONE`, and `booked = 1` in `metrics`.
+
+```mermaid
+stateDiagram-v2
+    QUALIFYING --> QUALIFIED: need, budget, timing known (offer 1)
+    QUALIFIED --> QUALIFIED: no clear pick, or slot taken (offer 2, once)
+    QUALIFIED --> BOOKED: pick + appointment created
+    BOOKED --> DONE: stage Booked, tag booked, confirmation SMS
+    QUALIFIED --> HANDOFF: no free slots, asks for a person, or a third offer needed
+```
+
+The calendar id, pipeline id and Booked stage id come from one function, `ghl.booking_ids()`: the location's `installs` row (Step 5) when it has them, else `GHL_CALENDAR_ID`, `GHL_PIPELINE_ID`, `GHL_BOOKED_STAGE_ID`. The offered times are kept on the lead (`leads.offered_slots`, `leads.offers`).
+
+### 1. Create the calendar and the pipeline in the sandbox
+
+1. **Calendars → Calendar Settings → Create Calendar**, a personal booking calendar named `Intro call`: 30-minute meetings, you as the team member, availability e.g. Mon-Fri 9:00-17:00. Set its time zone to your leads' time zone: the SMS shows times in the calendar's zone without naming it. The agent only offers what GHL reports as free here.
+2. **Opportunities → Pipelines → Create new pipeline** named `Speed to Lead` with two stages: `New lead` and `Booked`.
+
+### 2. Add the scopes
+
+Private Integration Token from Step 1: **Settings → Private Integrations → your integration → Edit**, add these, save (the token stays the same):
+
+| Scope | Used by |
+|-------|---------|
+| `calendars.readonly` | free slots, and listing calendars in 3 |
+| `calendars/events.write` | book the appointment |
+| `opportunities.write` | move the opportunity to Booked |
+| `opportunities.readonly` | only for listing pipelines in 3; the app does not need it |
+
+The OAuth app of Step 5 already asks for the first three.
+
+### 3. Find the ids
+
+With your token and location id from `.env`:
+
+```bash
+curl -s "https://services.leadconnectorhq.com/calendars?locationId=<GHL_LOCATION_ID>" \
+  -H "Authorization: Bearer <GHL_PRIVATE_TOKEN>" -H "Version: v3" \
+  | jq -r '.calendars[] | "\(.id)\t\(.name)"'
+```
+
+Expected, one line per calendar:
+
+```
+ocQHyuzHvysMo5N5VsXc	Intro call
+```
+
+```bash
+curl -s "https://services.leadconnectorhq.com/opportunities/pipelines?locationId=<GHL_LOCATION_ID>" \
+  -H "Authorization: Bearer <GHL_PRIVATE_TOKEN>" -H "Version: v3" \
+  | jq -r '.pipelines[] | "\(.id)\t\(.name)", (.stages[] | "  \(.id)\t\(.name)")'
+```
+
+Expected, each pipeline with its stages indented:
+
+```
+aWdODOBVOlH1RUFKWQke	Speed to Lead
+  38704eb0-6b4f-4c3e-8919-4835d51de0c8	New lead
+  7915dedc-8f18-44d5-8bc3-77c04e994a10	Booked
+```
+
+The Booked stage id must be a stage of that pipeline.
+
+### 4. Set the env vars
+
+In `.env` and in Render → your service → **Environment**:
+
+| Key | Value from 3 |
+|-----|--------------|
+| `GHL_CALENDAR_ID` | the `Intro call` id |
+| `GHL_PIPELINE_ID` | the `Speed to Lead` id |
+| `GHL_BOOKED_STAGE_ID` | the indented `Booked` id |
+
+Save; Render redeploys. Locally, delete a `speed_to_lead.db` made before this step (the `leads` table got two columns); the app creates a fresh one on start.
+
+```bash
+pytest -q
+```
+
+Expected: `49 passed`. The booking cases (offer and pick, booking + stage + confirmation, no free slots, slot taken at booking time, unclear pick) are in `tests/test_agent.py`; the three endpoints against their doc examples in `tests/test_ghl.py`.
+
+### 5. Be the lead
+
+Add a new contact `Jane` with your mobile number and answer the three questions as in Step 3. Then (exact words vary):
+
+```
+Agent: Thanks Jane, sounds like a great fit! Which time works for a quick call? 1) Mon Nov 16, 10:00 AM, 2) Mon Nov 16, 10:30 AM, 3) Tue Nov 17, 9:00 AM
+You:   the second one
+Agent: You're all set, Jane: your call is booked for Mon Nov 16, 10:30 AM. Looking forward to talking!
+```
+
+Render → **Logs**:
+
+```
+INFO app.agent: lead contact=<contactId> QUALIFYING -> QUALIFIED
+INFO app.agent: lead contact=<contactId> offer 1: 2026-11-16T10:00:00-06:00 | 2026-11-16T10:30:00-06:00 | 2026-11-17T09:00:00-06:00
+INFO app.agent: lead contact=<contactId> QUALIFIED -> BOOKED appointment=<appointmentId>
+INFO app.agent: lead contact=<contactId> BOOKED -> DONE opportunity=<opportunityId>
+```
+
+It worked if, in GHL:
+
+- **Calendars → Calendar view** shows `Intro call - Jane` at the time you picked, status confirmed (also under the contact's appointments).
+- **Opportunities → Speed to Lead** shows Jane's card in the **Booked** column.
+- The contact has the tag `booked`.
+- `sqlite3 speed_to_lead.db "SELECT state FROM leads; SELECT booked FROM metrics;"` prints `DONE` and `1`.
+
+Try the other paths with a new contact each:
+
+| At the offer you | Agent | Log | In GHL |
+|------------------|-------|-----|--------|
+| text `none of those work` | asks again with the same times; a second unclear answer → a teammate will text | `offer 2: ...`, then `-> HANDOFF` | tag `handoff` |
+| text `can I talk to a person` | says a teammate will text | `QUALIFIED -> HANDOFF` | tag `handoff` |
+| book the offered time yourself in GHL, then text `the first one` | sorry, that time was just taken, here are new times | `slot taken contact=... slot=...`, `offer 2: ...` | |
+| (calendar with no availability this week) | after the third answer: a teammate will text | `no free slots contact=...`, `-> HANDOFF` | tag `handoff` |
+
+### Caveats
+
+- No nudges while the lead decides: a lead who never picks a time stays `QUALIFIED`; filter for them in GHL by the absence of `booked`.
+- The free-tier database resets on deploy (Step 2), so a lead mid-offer is forgotten and their pick logs `reply not for the agent`.
+
+### If it fails
+
+| What you see | Fix |
+|--------------|-----|
+| `webhook failed id=...` with `GHL_CALENDAR_ID, GHL_PIPELINE_ID and GHL_BOOKED_STAGE_ID must be set` | Set them (4) on this service. |
+| `GHL rejected the token (401 on /calendars/...)` or `(401 on /opportunities/upsert)` | Token lacks a scope from 2. |
+| `GHL /calendars/<id>/free-slots failed (4xx ...)` | Wrong calendar id, or the calendar is a draft: activate it. |
+| `GHL /opportunities/upsert failed (4xx ...)` | The Booked stage id is not a stage of `GHL_PIPELINE_ID`: redo 3. |
+| `sqlite3.OperationalError: no such column: offered_slots` | Local database from before this step: delete it (4). |
+
 ## Step 5 - OAuth app
 
 Goal: a client installs the app into their sub-account with one click, and the app keeps a working token for it without anyone copying tokens around. The Private Integration Token from Step 1 stays as the fallback for a location without an install.
@@ -358,7 +498,6 @@ Reuse the app from Step 2 (or create one: [marketplace.gohighlevel.com](https://
    | `conversations/message.write` | send SMS |
    | `calendars.readonly` | free slots (Step 4) |
    | `calendars/events.write` | book the appointment (Step 4) |
-   | `opportunities.readonly` | read pipelines (Step 4) |
    | `opportunities.write` | move the stage to Booked (Step 4) |
 
 2. Redirect URL: `https://<app>.onrender.com/oauth/callback` → **Add**.
