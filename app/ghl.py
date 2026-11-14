@@ -17,6 +17,7 @@ INSTALL_URL = "https://marketplace.gohighlevel.com/v2/oauth/chooselocation"
 # What the app asks for at install. Each endpoint's doc page names the scope it needs.
 SCOPES = [
     "contacts.readonly",  # POST /contacts/search, ContactCreate webhook
+    "contacts.write",  # POST /contacts/{contactId}/tags (Step 3)
     "conversations/message.readonly",  # InboundMessage webhook
     "conversations/message.write",  # POST /conversations/messages
     "calendars.readonly",  # GET /calendars/{calendarId}/free-slots
@@ -162,3 +163,11 @@ def send_sms(contact_id: str, message: str) -> str:
         {"type": "SMS", "contactId": contact_id, "message": message, "status": "pending"},
     )
     return data["messageId"]
+
+
+# https://marketplace.gohighlevel.com/docs/ghl/contacts/add-tags
+# Scope: contacts.write
+def add_tags(contact_id: str, tags: list[str]) -> list[str]:
+    """Add tags to a contact; returns the contact's tags after the call."""
+    data = _post(f"/contacts/{contact_id}/tags", {"tags": tags})
+    return data.get("tags", [])

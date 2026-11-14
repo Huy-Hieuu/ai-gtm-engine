@@ -8,7 +8,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from fastapi.testclient import TestClient
 
-from app import config, db, webhooks
+from app import agent, config, db, webhooks
 from app.main import app
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -30,6 +30,9 @@ def client(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(config, "GHL_WEBHOOK_PUBLIC_KEY", public_pem.decode())
     monkeypatch.setattr(config, "DATABASE_PATH", str(tmp_path / "test.db"))
+    # The agent has its own tests (test_agent.py); here only the webhook layer runs.
+    monkeypatch.setattr(agent, "on_contact_create", lambda event: None)
+    monkeypatch.setattr(agent, "on_inbound", lambda event: None)
     with TestClient(app) as c:
         yield c
 

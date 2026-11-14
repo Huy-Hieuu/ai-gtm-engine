@@ -27,6 +27,27 @@ CREATE TABLE IF NOT EXISTS installs (
     pipeline_id     TEXT,
     booked_stage_id TEXT
 );
+
+-- One row per contact the agent talks to. Times are UTC ISO strings.
+CREATE TABLE IF NOT EXISTS leads (
+    contact_id      TEXT PRIMARY KEY,
+    first_name      TEXT NOT NULL DEFAULT '',
+    state           TEXT NOT NULL,
+    need            TEXT,
+    budget          TEXT,
+    timing          TEXT,
+    created_at      TEXT NOT NULL,
+    last_msg_at     TEXT,              -- last question we sent; nudges count from here
+    nudges          INTEGER NOT NULL DEFAULT 0,
+    last_inbound_id TEXT               -- GHL messageId of the last reply handled
+);
+
+CREATE TABLE IF NOT EXISTS metrics (
+    contact_id          TEXT PRIMARY KEY,
+    first_reply_seconds REAL,          -- contact created -> first SMS sent
+    qualified           INTEGER NOT NULL DEFAULT 0,
+    booked              INTEGER NOT NULL DEFAULT 0
+);
 """
 
 
@@ -103,3 +124,90 @@ def get_install(location_id: str) -> dict | None:
     install["refresh_token"] = f.decrypt(row["refresh_token"].encode()).decode()
     install["expires_at"] = datetime.fromisoformat(row["expires_at"])
     return install
+
+
+LEAD_FIELDS = {"first_name", "state", "need", "budget", "timing", "last_msg_at", "nudges"}
+METRIC_FIELDS = {"first_reply_seconds", "qualified", "booked"}
+
+
+def insert_lead(contact_id: str, first_name: str, state: str, created_at: str) -> bool:
+    """Start tracking a contact. False if it is already tracked."""
+    with closing(_connect()) as conn, conn:
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO leads (contact_id, first_name, state, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            (contact_id, first_name, state, created_at),
+        )
+        return cur.rowcount == 1
+
+
+def get_lead(contact_id: str) -> dict | None:
+    with closing(_connect()) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT * FROM leads WHERE contact_id = ?", (contact_id,)).fetchone()
+        return dict(row) if row else None
+
+
+def update_lead(contact_id: str, **fields) -> None:
+    unknown = fields.keys() - LEAD_FIELDS
+    if unknown:
+        raise ValueError(f"not lead fields: {sorted(unknown)}")
+    sets = ", ".join(f"{name} = ?" for name in fields)
+    with closing(_connect()) as conn, conn:
+        conn.execute(f"UPDATE leads SET {sets} WHERE contact_id = ?", (*fields.values(), contact_id))
+
+
+def claim_inbound(contact_id: str, message_id: str) -> bool:
+    """Mark a reply as handled. False if it already was (same GHL messageId)."""
+    with closing(_connect()) as conn, conn:
+        cur = conn.execute(
+            "UPDATE leads SET last_inbound_id = ? "
+            "WHERE contact_id = ? AND (last_inbound_id IS NULL OR last_inbound_id != ?)",
+            (message_id, contact_id, message_id),
+        )
+        return cur.rowcount == 1
+
+
+def leads_to_nudge(states: tuple[str, ...], max_nudges: int) -> list[dict]:
+    """Leads waiting on a reply that have not had every nudge yet."""
+    marks = ", ".join("?" for _ in states)
+    with closing(_connect()) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            f"SELECT * FROM leads WHERE state IN ({marks}) AND nudges < ? "
+            "AND last_msg_at IS NOT NULL",
+            (*states, max_nudges),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def claim_nudge(contact_id: str, nudges: int) -> bool:
+    """Count nudge number `nudges + 1` as sent. False if another run already counted it."""
+    with closing(_connect()) as conn, conn:
+        cur = conn.execute(
+            "UPDATE leads SET nudges = nudges + 1 WHERE contact_id = ? AND nudges = ?",
+            (contact_id, nudges),
+        )
+        return cur.rowcount == 1
+
+
+def set_metrics(contact_id: str, **fields) -> None:
+    unknown = fields.keys() - METRIC_FIELDS
+    if unknown:
+        raise ValueError(f"not metric fields: {sorted(unknown)}")
+    cols = ", ".join(fields)
+    marks = ", ".join("?" for _ in fields)
+    updates = ", ".join(f"{name} = excluded.{name}" for name in fields)
+    with closing(_connect()) as conn, conn:
+        conn.execute(
+            f"INSERT INTO metrics (contact_id, {cols}) VALUES (?, {marks}) "
+            f"ON CONFLICT(contact_id) DO UPDATE SET {updates}",
+            (contact_id, *fields.values()),
+        )
+
+
+def get_metrics(contact_id: str) -> dict | None:
+    with closing(_connect()) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT * FROM metrics WHERE contact_id = ?", (contact_id,)).fetchone()
+        return dict(row) if row else None

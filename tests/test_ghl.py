@@ -61,6 +61,18 @@ def test_send_sms():
 
 
 @respx.mock
+def test_add_tags():
+    route = respx.post(f"{BASE}/contacts/abc123def456/tags").respond(201, json=fixture("add_tags.json"))
+
+    tags = ghl.add_tags("abc123def456", ["handoff"])
+
+    request = route.calls.last.request
+    assert_ghl_headers(request)
+    assert json.loads(request.content) == {"tags": ["handoff"]}
+    assert tags == ["minim", "velit magna"]
+
+
+@respx.mock
 @pytest.mark.parametrize(
     "call, path",
     [

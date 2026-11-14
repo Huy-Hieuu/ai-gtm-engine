@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 from contextlib import asynccontextmanager
@@ -5,16 +6,31 @@ from contextlib import asynccontextmanager
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.responses import RedirectResponse
 
-from app import db, ghl, webhooks
+from app import agent, db, ghl, webhooks
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("app.main")
 
 
+# How often the app checks for leads due a nudge (Step 3, NO REPLY).
+NUDGE_CHECK_SECONDS = 60
+
+
+async def nudge_loop() -> None:
+    while True:
+        await asyncio.sleep(NUDGE_CHECK_SECONDS)
+        try:
+            await asyncio.to_thread(agent.send_nudges)
+        except Exception:
+            log.exception("nudge check failed")
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     db.init()
+    nudges = asyncio.create_task(nudge_loop())
     yield
+    nudges.cancel()
 
 
 app = FastAPI(title="GHL Speed-to-Lead", lifespan=lifespan)
