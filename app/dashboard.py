@@ -42,7 +42,7 @@ PAGE = """<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Speed-to-Lead dashboard</title>
+<title>AI GTM Engine dashboard</title>
 <style>
 body {{ margin: 0; background: #fff; color: #111827; font: 15px/1.5 -apple-system, "Segoe UI", Roboto, sans-serif; }}
 main {{ max-width: 1020px; margin: 0 auto; padding: 24px 16px 48px; }}
@@ -61,7 +61,7 @@ code {{ font-size: 13px; background: #f3f4f6; padding: 1px 4px; border-radius: 4
 </head>
 <body>
 <main>
-<h1>Speed-to-Lead dashboard</h1>
+<h1>AI GTM Engine dashboard</h1>
 <p class="sub">Every lead the agent texted, from this app's database. Reload for fresh numbers.</p>
 <div class="cards">
 <div class="card"><b>{leads}</b><span>leads</span></div>

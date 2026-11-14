@@ -1,4 +1,17 @@
-# AI Speed-to-Lead Agent for GoHighLevel
+# AI GTM Engine
+
+An AI go-to-market (GTM) engine on GoHighLevel: one pipeline from lead sourcing → enrichment → AI scoring → personalised outreach → reply routing → Speed-to-Lead booking in GHL. The Speed-to-Lead module is built and running; the earlier stages are planned and not built yet.
+
+| Stage | Status |
+|-------|--------|
+| Lead sourcing | planned |
+| Enrichment | planned |
+| AI scoring | planned |
+| Personalised outreach | planned |
+| Reply routing | planned |
+| Speed-to-Lead: SMS reply in < 60 s, AI qualify, booking, pipeline stage, OAuth install, dashboard | built |
+
+## Speed-to-Lead module
 
 A new GoHighLevel lead gets an AI text within seconds, is qualified by SMS, books a meeting on your calendar and lands in the **Booked** pipeline stage, with no one touching it.
 
@@ -110,8 +123,8 @@ Python 3.11 · FastAPI · httpx · SQLite · `cryptography` (Ed25519 webhook che
 ## Run it
 
 ```bash
-git clone https://github.com/Huy-Hieuu/ghl-speed-to-lead.git
-cd ghl-speed-to-lead
+git clone https://github.com/Huy-Hieuu/ai-gtm-engine.git
+cd ai-gtm-engine
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements-dev.txt
 pytest -q                        # 56 passed, no keys needed
@@ -140,7 +153,7 @@ No passwords go in this repo; every secret lives in `.env` (git-ignored) or in R
 | OpenAI model (optional) | default `gpt-6-luna` | `OPENAI_MODEL` |
 | Business description (optional) | your own words, e.g. `a roofing company in Austin` | `BUSINESS_DESCRIPTION` |
 | Dashboard token | any long random string; Render generates one from `render.yaml` (Step 6) | `DASHBOARD_TOKEN` |
-| Database file (optional) | default `speed_to_lead.db` | `DATABASE_PATH` |
+| Database file (optional) | default `gtm_engine.db` | `DATABASE_PATH` |
 | GHL API base (optional) | default `https://services.leadconnectorhq.com`; leave it | `GHL_API_BASE` |
 | Render account linked to GitHub | [dashboard.render.com](https://dashboard.render.com) (Step 2.2) | |
 
@@ -185,7 +198,7 @@ Goal: prove the token works by listing contacts and sending one SMS.
 In your GHL sandbox sub-account:
 
 1. **Settings → Private Integrations → Create new Integration.** (Not in settings? Enable it under Labs.)
-2. Name it, e.g. `speed-to-lead`.
+2. Name it, e.g. `ai-gtm-engine`.
 3. Select only these scopes:
 
    | Scope | Used by |
@@ -285,7 +298,7 @@ Only GHL holds the private key, so any hand-made request is rejected; that is th
 
 ### 2. Deploy to Render
 
-1. [Render dashboard](https://dashboard.render.com) → **New → Blueprint** → connect this GitHub repo. Render reads `render.yaml` and creates one free web service named `ghl-speed-to-lead`.
+1. [Render dashboard](https://dashboard.render.com) → **New → Blueprint** → connect this GitHub repo. Render reads `render.yaml` and creates one free web service named `ai-gtm-engine`.
 2. It asks for `GHL_PRIVATE_TOKEN` and `GHL_LOCATION_ID`; paste the Step 1 values (Step 2 itself does not use them).
 3. **Apply**. Wait for the deploy log to end with `Your service is live`.
 
@@ -461,7 +474,7 @@ After `HANDOFF` or `NOT_A_FIT` further texts log `reply not for the agent contac
 Where the app runs (locally, or a Render Shell on a paid instance):
 
 ```bash
-sqlite3 speed_to_lead.db "SELECT contact_id, state, need, budget, timing, nudges FROM leads; SELECT * FROM metrics;"
+sqlite3 gtm_engine.db "SELECT contact_id, state, need, budget, timing, nudges FROM leads; SELECT * FROM metrics;"
 ```
 
 Expected for the exchange above:
@@ -570,7 +583,7 @@ In `.env` and in Render → your service → **Environment**:
 | `GHL_PIPELINE_ID` | the `Speed to Lead` id |
 | `GHL_BOOKED_STAGE_ID` | the indented `Booked` id |
 
-Save; Render redeploys. Locally, delete a `speed_to_lead.db` made before this step (the `leads` table got two columns); the app creates a fresh one on start.
+Save; Render redeploys. Locally, delete a `gtm_engine.db` made before this step (the `leads` table got two columns); the app creates a fresh one on start.
 
 ```bash
 pytest -q
@@ -602,7 +615,7 @@ It worked if, in GHL:
 - **Calendars → Calendar view** shows `Intro call - Jane` at the time you picked, status confirmed (also under the contact's appointments).
 - **Opportunities → Speed to Lead** shows Jane's card in the **Booked** column.
 - The contact has the tag `booked`.
-- `sqlite3 speed_to_lead.db "SELECT state FROM leads; SELECT booked FROM metrics;"` prints `DONE` and `1`.
+- `sqlite3 gtm_engine.db "SELECT state FROM leads; SELECT booked FROM metrics;"` prints `DONE` and `1`.
 
 Try the other paths with a new contact each:
 

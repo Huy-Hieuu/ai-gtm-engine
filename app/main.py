@@ -34,7 +34,7 @@ async def lifespan(_: FastAPI):
     nudges.cancel()
 
 
-app = FastAPI(title="GHL Speed-to-Lead", lifespan=lifespan)
+app = FastAPI(title="AI GTM Engine", lifespan=lifespan)
 
 
 @app.get("/health")

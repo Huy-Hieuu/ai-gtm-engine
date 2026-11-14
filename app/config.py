@@ -25,7 +25,7 @@ GHL_REDIRECT_URI = os.getenv("GHL_REDIRECT_URI", "")
 APP_ENCRYPTION_KEY = os.getenv("APP_ENCRYPTION_KEY", "")
 
 # SQLite file. On Render's free tier the disk is temporary: the file resets on every deploy.
-DATABASE_PATH = os.getenv("DATABASE_PATH", "speed_to_lead.db")
+DATABASE_PATH = os.getenv("DATABASE_PATH", "gtm_engine.db")
 
 # Secret for GET /dashboard?token=...; unset keeps the dashboard closed.
 DASHBOARD_TOKEN = os.getenv("DASHBOARD_TOKEN", "")

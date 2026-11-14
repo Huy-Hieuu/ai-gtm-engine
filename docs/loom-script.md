@@ -15,7 +15,7 @@ A walkthrough of one real lead in the GHL sandbox, from form to booked meeting, 
 
 | Time | Scene | Show | Say |
 |------|-------|------|-----|
-| 0:00-0:15 | Hook | GitHub README, top: pitch line and architecture diagram | "Leads go cold in minutes. This is an AI speed-to-lead agent for GoHighLevel: a new lead gets a text within seconds, gets qualified by SMS and books a meeting, with no one touching it. Let me show you a real run in my sandbox." |
+| 0:00-0:15 | Hook | GitHub README, top: pitch line and architecture diagram | "Leads go cold in minutes. This is the Speed-to-Lead module of AI GTM Engine, my AI go-to-market engine on GoHighLevel: a new lead gets a text within seconds, gets qualified by SMS and books a meeting, with no one touching it. Let me show you a real run in my sandbox." |
 | 0:15-0:30 | How it fits | Architecture diagram, point at GHL, the app, the LLM | "GoHighLevel keeps the contacts, messages, calendar and pipeline. My FastAPI app listens to GHL webhooks, decides what to do, and calls the GHL API. The LLM only writes the words and reads the answers; the code owns every decision." |
 | 0:30-0:50 | New lead | GHL **Contacts → Add Contact**: first name, your mobile number, Save. Then the phone. | "I add a lead the way a form would. ... And here's the text on my phone, a few seconds later, already asking what they need." |
 | 0:50-1:25 | Qualify | Reply from the phone to the three questions (need, budget, timing). Keep the contact's **Conversations** tab visible next to it. | "I answer like a lead would. It asks one thing at a time: what they need, budget, timing. Every message is in GHL's own conversation history, so the team sees everything." |
