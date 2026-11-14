@@ -21,18 +21,60 @@ EXTRACTIONS = {
     "not interested, wrong number": {**NOTHING, "fit": False},
     "can I talk to a person": {**NOTHING, "wants_human": True},
 }
+# What the fake LLM reads in a reply to offered times.
+NO_PICK = {"choice": None, "wants_human": False, "unsure": False}
+PICKS = {
+    "the first one": {**NO_PICK, "choice": 1},
+    "2 works": {**NO_PICK, "choice": 2},
+    "maybe later": NO_PICK,
+    "can I talk to a person": {**NO_PICK, "wants_human": True},
+}
+# The calendar's free slots (as in fixtures/free_slots.json); the fake books from this list.
+FREE = [
+    "2026-11-16T10:00:00-06:00",
+    "2026-11-16T10:30:00-06:00",
+    "2026-11-16T14:00:00-06:00",
+    "2026-11-17T09:00:00-06:00",
+]
+OFFER_TIMES = "1) Mon Nov 16, 10:00 AM, 2) Mon Nov 16, 10:30 AM, 3) Tue Nov 17, 9:00 AM"
 
 
 @pytest.fixture
-def sent(monkeypatch, tmp_path):
-    """SMS goals and tags the agent sent, in order."""
+def free():
+    """Free slots of the fake calendar. A test removes one to have it taken by someone else."""
+    return list(FREE)
+
+
+@pytest.fixture
+def sent(monkeypatch, tmp_path, free):
+    """SMS goals, tags, bookings and stage moves the agent made, in order."""
     monkeypatch.setattr(config, "DATABASE_PATH", str(tmp_path / "test.db"))
+    monkeypatch.setattr(config, "GHL_LOCATION_ID", "loc123")
+    monkeypatch.setattr(config, "GHL_CALENDAR_ID", "cal1")
+    monkeypatch.setattr(config, "GHL_PIPELINE_ID", "pipe1")
+    monkeypatch.setattr(config, "GHL_BOOKED_STAGE_ID", "stage-booked")
     db.init()
     out = []
+
+    def create_appointment(calendar_id, contact_id, slot, title):
+        if slot not in free:
+            raise ghl.GHLError("GHL /calendars/events/appointments failed (400): slot not available")
+        free.remove(slot)
+        out.append(f"appointment {slot}")
+        return "appt-1"
+
+    def move_opportunity(pipeline_id, stage_id, contact_id, name):
+        out.append(f"stage {stage_id}")
+        return "opp-1"
+
     monkeypatch.setattr(llm, "write_reply", lambda goal, first_name="": f"SMS to {first_name}: {goal}")
     monkeypatch.setattr(llm, "extract", lambda question, text: EXTRACTIONS[text])
+    monkeypatch.setattr(llm, "pick_slot", lambda times, text: PICKS[text])
     monkeypatch.setattr(ghl, "send_sms", lambda contact_id, text: out.append(text) or "msg-id")
     monkeypatch.setattr(ghl, "add_tags", lambda contact_id, tags: out.append(f"tags {tags}") or tags)
+    monkeypatch.setattr(ghl, "free_slots", lambda calendar_id, start, end: list(free))
+    monkeypatch.setattr(ghl, "create_appointment", create_appointment)
+    monkeypatch.setattr(ghl, "move_opportunity", move_opportunity)
     return out
 
 
@@ -52,6 +94,12 @@ def state() -> str:
     return db.get_lead(CONTACT)["state"]
 
 
+def qualify() -> None:
+    contact_created()
+    for text in ("I need a new website", "around 3k", "next month"):
+        reply(text)
+
+
 def test_happy_path_qualifies_in_three_questions(sent):
     contact_created()
     assert state() == agent.QUALIFYING
@@ -67,7 +115,7 @@ def test_happy_path_qualifies_in_three_questions(sent):
     lead = db.get_lead(CONTACT)
     assert lead["state"] == agent.QUALIFIED
     assert (lead["need"], lead["budget"], lead["timing"]) == ("new website", "$3k", "next month")
-    assert sent[-1] == "SMS to John: " + agent.QUALIFIED_GOAL
+    assert sent[-1] == "SMS to John: " + agent.OFFER_GOAL.format(times=OFFER_TIMES)
     assert len(sent) == 4
     assert db.get_metrics(CONTACT)["qualified"] == 1
 
@@ -138,3 +186,71 @@ def test_contact_without_sms_consent_is_not_texted(sent):
 
     assert sent == []
     assert db.get_lead(CONTACT) is None
+
+
+def test_picked_slot_is_booked_staged_tagged_and_confirmed(sent):
+    qualify()
+    reply("2 works")
+
+    assert sent[4:] == [
+        "appointment 2026-11-16T10:30:00-06:00",
+        "stage stage-booked",
+        "tags ['booked']",
+        "SMS to John: " + agent.BOOKED_GOAL.format(time="Mon Nov 16, 10:30 AM"),
+    ]
+    assert state() == agent.DONE
+    assert db.get_metrics(CONTACT)["booked"] == 1
+
+    reply("the first one")
+    assert len(sent) == 8  # done: no second booking
+
+
+def test_no_free_slots_hands_off(sent, free):
+    free.clear()
+    qualify()
+
+    assert state() == agent.HANDOFF
+    assert sent[3:] == ["SMS to John: " + agent.HANDOFF_GOAL, "tags ['handoff']"]
+
+
+def test_slot_taken_meanwhile_offers_again_once(sent, free):
+    qualify()
+    free.remove("2026-11-16T10:00:00-06:00")  # someone else books it first
+    reply("the first one", message_id="m-1")
+
+    new_times = "1) Mon Nov 16, 10:30 AM, 2) Mon Nov 16, 2:00 PM, 3) Tue Nov 17, 9:00 AM"
+    assert sent[4:] == ["SMS to John: " + agent.TAKEN_GOAL.format(times=new_times)]
+    assert state() == agent.QUALIFIED
+
+    free.remove("2026-11-16T10:30:00-06:00")  # taken again: no third offer
+    reply("the first one", message_id="m-2")
+    assert state() == agent.HANDOFF
+    assert sent[5:] == ["SMS to John: " + agent.HANDOFF_GOAL, "tags ['handoff']"]
+
+
+def test_slot_taken_then_new_pick_books(sent, free):
+    qualify()
+    free.remove("2026-11-16T10:00:00-06:00")
+    reply("the first one", message_id="m-1")
+    reply("2 works")
+
+    assert sent[-4] == "appointment 2026-11-16T14:00:00-06:00"
+    assert state() == agent.DONE
+
+
+def test_unclear_pick_asks_again_once_then_hands_off(sent):
+    qualify()
+    reply("maybe later", message_id="m-1")
+    assert sent[-1] == "SMS to John: " + agent.ASK_AGAIN_GOAL.format(times=OFFER_TIMES)
+
+    reply("maybe later", message_id="m-2")
+    assert state() == agent.HANDOFF
+    assert sent[-2:] == ["SMS to John: " + agent.HANDOFF_GOAL, "tags ['handoff']"]
+
+
+def test_asking_for_a_person_at_the_offer_hands_off(sent):
+    qualify()
+    reply("can I talk to a person", message_id="m-1")
+
+    assert state() == agent.HANDOFF
+    assert sent[-2:] == ["SMS to John: " + agent.HANDOFF_GOAL, "tags ['handoff']"]

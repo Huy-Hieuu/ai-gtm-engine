@@ -10,6 +10,12 @@ GHL_PRIVATE_TOKEN = os.getenv("GHL_PRIVATE_TOKEN", "")
 GHL_LOCATION_ID = os.getenv("GHL_LOCATION_ID", "")
 GHL_API_BASE = os.getenv("GHL_API_BASE", "https://services.leadconnectorhq.com")
 
+# Step 4 booking: the calendar to book on, the pipeline, and its Booked stage. Ids saved on the
+# location's OAuth install row take precedence (`ghl.booking_ids`).
+GHL_CALENDAR_ID = os.getenv("GHL_CALENDAR_ID", "")
+GHL_PIPELINE_ID = os.getenv("GHL_PIPELINE_ID", "")
+GHL_BOOKED_STAGE_ID = os.getenv("GHL_BOOKED_STAGE_ID", "")
+
 # OAuth app (Step 5), from the Marketplace developer portal: My Apps -> your app -> Advanced Settings -> Auth.
 GHL_CLIENT_ID = os.getenv("GHL_CLIENT_ID", "")
 GHL_CLIENT_SECRET = os.getenv("GHL_CLIENT_SECRET", "")

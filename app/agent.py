@@ -1,16 +1,19 @@
 """The SMS agent. The one owner of lead states and transitions.
 
-The LLM writes the words (`llm.write_reply`) and reads the lead's answers (`llm.extract`);
-this module decides the next state and what to send. `decide` is pure, so every transition
-is testable without the network.
+The LLM writes the words (`llm.write_reply`) and reads the lead's answers (`llm.extract`,
+`llm.pick_slot`); this module decides the next state and what to send. `decide` and
+`choose_offer` are pure, so the rules are testable without the network.
 
     ContactCreate -> NEW -> greeting + Q1 -> QUALIFYING
     QUALIFYING -> next question until need, budget and timing are known -> QUALIFIED
-    QUALIFIED -> on_qualified (Step 4 offers slots) -> BOOKED -> DONE
-    side exits: NOT_A_FIT (polite close + tag), HANDOFF (human asked or unsure + tag),
+    QUALIFIED -> 2-3 free slots offered; the lead picks one -> appointment booked -> BOOKED
+    BOOKED -> opportunity moved to the Booked stage, tag, confirmation SMS -> DONE
+    side exits: NOT_A_FIT (polite close + tag), HANDOFF (human asked, unsure, no free slots, or
+                no pick after MAX_OFFERS offers + tag),
                 NO_REPLY (nudges at 1 h and 24 h; a reply resumes qualifying)
 """
 
+import json
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -44,13 +47,25 @@ NUDGE_AFTER = (timedelta(hours=1), timedelta(hours=24))
 
 TAG_NOT_A_FIT = "not-a-fit"
 TAG_HANDOFF = "handoff"
+TAG_BOOKED = "booked"
+
+# Slots are offered from this far ahead (GHL allows up to 31 days per request).
+SLOT_WINDOW = timedelta(days=7)
+OFFER_SIZE = 3
+# Offering times again (no clear pick, or the slot was taken meanwhile) happens once; then a human.
+MAX_OFFERS = 2
 
 GREETING_GOAL = "greet them, say you got their inquiry and will help, and {question}"
 NEXT_GOAL = "thank them briefly for the answer and {question}"
 NUDGE_GOAL = "gently follow up because they have not replied yet, and again {question}"
 HANDOFF_GOAL = "say a teammate will text them personally very soon"
 NOT_A_FIT_GOAL = "thank them, say politely that this is not a fit right now, and close the chat"
-QUALIFIED_GOAL = "thank them, say they look like a good fit, and say you will text a few meeting times shortly"
+OFFER_GOAL = (
+    "thank them, say they look like a good fit, and ask which of these meeting times works: {times}"
+)
+ASK_AGAIN_GOAL = "say you did not catch which time they want and ask them to pick one of: {times}"
+TAKEN_GOAL = "say sorry, that time was just taken, and ask which of these times works instead: {times}"
+BOOKED_GOAL = "confirm their meeting is booked for {time} and say you look forward to talking"
 
 
 @dataclass(frozen=True)
@@ -90,6 +105,23 @@ def _send(lead: dict, goal: str) -> None:
     ghl.send_sms(lead["contact_id"], llm.write_reply(goal, lead["first_name"]))
 
 
+def slot_label(slot: str) -> str:
+    """A GHL slot start time as a lead reads it, e.g. `Mon Nov 16, 10:00 AM` (calendar's time zone)."""
+    t = datetime.fromisoformat(slot)
+    return f"{t:%a %b} {t.day}, {t.hour % 12 or 12}:{t:%M} {'AM' if t.hour < 12 else 'PM'}"
+
+
+def choose_offer(slots: list[str]) -> list[str]:
+    """Up to OFFER_SIZE of the free slots: the earliest of each day first, so the lead gets a choice
+    of days, then the next earliest. Pure."""
+    first_of_day: dict[str, str] = {}
+    for slot in slots:
+        first_of_day.setdefault(slot[:10], slot)
+    picks = list(first_of_day.values())[:OFFER_SIZE]
+    picks += [s for s in slots if s not in picks][: OFFER_SIZE - len(picks)]
+    return sorted(picks, key=datetime.fromisoformat)
+
+
 # https://marketplace.gohighlevel.com/docs/webhook/ContactCreate
 def on_contact_create(event: dict, now: datetime | None = None) -> None:
     """A new lead: text greeting + first question at once and record how fast that was."""
@@ -118,12 +150,15 @@ def on_inbound(event: dict, now: datetime | None = None) -> None:
         return
     contact_id = event["contactId"]
     lead = db.get_lead(contact_id)
-    if lead is None or lead["state"] not in LISTENING:
+    if lead is None or lead["state"] not in (*LISTENING, QUALIFIED):
         log.info("reply not for the agent contact=%s state=%s", contact_id, lead and lead["state"])
         return
     message_id = event.get("messageId")
     if message_id and not db.claim_inbound(contact_id, message_id):
         log.info("reply duplicate skipped contact=%s message=%s", contact_id, message_id)
+        return
+    if lead["state"] == QUALIFIED:
+        _on_slot_reply(lead, event.get("body") or "", now or _now())
         return
 
     asked = next_question(lead) or "anything else"
@@ -142,12 +177,85 @@ def on_inbound(event: dict, now: datetime | None = None) -> None:
     log.info("lead contact=%s %s -> %s", contact_id, lead["state"], decision.state)
     if decision.state == QUALIFIED:
         db.set_metrics(contact_id, qualified=1)
-        on_qualified({**lead, **decision.answers, "state": QUALIFIED})
+        on_qualified({**lead, **decision.answers, "state": QUALIFIED}, now)
 
 
-def on_qualified(lead: dict) -> None:
-    """All three answers are in. Step 4 replaces this with real slots and booking."""
-    _send(lead, QUALIFIED_GOAL)
+def on_qualified(lead: dict, now: datetime | None = None) -> None:
+    """All three answers are in: offer free slots."""
+    _offer_free_slots(lead, OFFER_GOAL, now or _now())
+
+
+def _offer_free_slots(lead: dict, goal: str, now: datetime) -> None:
+    calendar_id = ghl.booking_ids()[0]
+    slots = choose_offer(ghl.free_slots(calendar_id, now, now + SLOT_WINDOW))
+    if not slots:
+        log.info("no free slots contact=%s in the next %s", lead["contact_id"], SLOT_WINDOW)
+        _handoff(lead, now)
+        return
+    _offer(lead, goal, slots, now)
+
+
+def _offer(lead: dict, goal: str, slots: list[str], now: datetime) -> None:
+    times = ", ".join(f"{n}) {slot_label(s)}" for n, s in enumerate(slots, 1))
+    _send(lead, goal.format(times=times))
+    offers = lead["offers"] + 1
+    db.update_lead(
+        lead["contact_id"],
+        state=QUALIFIED,
+        offered_slots=json.dumps(slots),
+        offers=offers,
+        last_msg_at=now.isoformat(),
+    )
+    log.info("lead contact=%s offer %d: %s", lead["contact_id"], offers, " | ".join(slots))
+
+
+def _handoff(lead: dict, now: datetime) -> None:
+    _send(lead, HANDOFF_GOAL)
+    db.update_lead(lead["contact_id"], state=HANDOFF, last_msg_at=now.isoformat())
+    ghl.add_tags(lead["contact_id"], [TAG_HANDOFF])
+    log.info("lead contact=%s %s -> %s", lead["contact_id"], lead["state"], HANDOFF)
+
+
+def _on_slot_reply(lead: dict, text: str, now: datetime) -> None:
+    """The lead answered an offer: book the time they picked, ask again once, or hand off."""
+    slots = json.loads(lead["offered_slots"])
+    pick = llm.pick_slot([slot_label(s) for s in slots], text)
+    if pick.get("wants_human") or pick.get("unsure"):
+        _handoff(lead, now)
+        return
+    choice = pick.get("choice")
+    if isinstance(choice, int) and 1 <= choice <= len(slots):
+        _book(lead, slots[choice - 1], now)
+    elif lead["offers"] < MAX_OFFERS:
+        _offer(lead, ASK_AGAIN_GOAL, slots, now)
+    else:
+        _handoff(lead, now)
+
+
+def _book(lead: dict, slot: str, now: datetime) -> None:
+    contact_id = lead["contact_id"]
+    calendar_id, pipeline_id, booked_stage_id = ghl.booking_ids()
+    name = f"Intro call - {lead['first_name'] or 'new lead'}"
+    try:
+        appointment_id = ghl.create_appointment(calendar_id, contact_id, slot, name)
+    except ghl.GHLError:
+        if slot in ghl.free_slots(calendar_id, now, now + SLOT_WINDOW):
+            raise  # the slot is still free, so this is a real error
+        log.info("slot taken contact=%s slot=%s", contact_id, slot)
+        if lead["offers"] < MAX_OFFERS:
+            _offer_free_slots(lead, TAKEN_GOAL, now)
+        else:
+            _handoff(lead, now)
+        return
+    db.update_lead(contact_id, state=BOOKED)
+    log.info("lead contact=%s QUALIFIED -> BOOKED appointment=%s", contact_id, appointment_id)
+
+    opportunity_id = ghl.move_opportunity(pipeline_id, booked_stage_id, contact_id, name)
+    ghl.add_tags(contact_id, [TAG_BOOKED])
+    _send(lead, BOOKED_GOAL.format(time=slot_label(slot)))
+    db.update_lead(contact_id, state=DONE, last_msg_at=now.isoformat())
+    db.set_metrics(contact_id, booked=1)
+    log.info("lead contact=%s BOOKED -> DONE opportunity=%s", contact_id, opportunity_id)
 
 
 def send_nudges(now: datetime | None = None) -> None:

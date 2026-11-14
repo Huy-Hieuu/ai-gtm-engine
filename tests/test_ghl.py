@@ -1,4 +1,5 @@
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import httpx
@@ -109,3 +110,78 @@ def test_cli_401_exits_with_error_message():
 
     with pytest.raises(SystemExit, match="error: GHL rejected the token"):
         hello.main(["sms", "abc123def456", "hi"])
+
+
+@respx.mock
+def test_free_slots_flattens_days_earliest_first():
+    route = respx.get(f"{BASE}/calendars/cal1/free-slots").respond(json=fixture("free_slots.json"))
+    start = datetime(2026, 11, 14, 15, 0, tzinfo=timezone.utc)
+
+    slots = ghl.free_slots("cal1", start, start + timedelta(days=7))
+
+    request = route.calls.last.request
+    assert_ghl_headers(request)
+    assert dict(request.url.params) == {"startDate": "1794668400000", "endDate": "1795273200000"}
+    assert slots == [
+        "2026-11-16T10:00:00-06:00",
+        "2026-11-16T10:30:00-06:00",
+        "2026-11-16T14:00:00-06:00",
+        "2026-11-17T09:00:00-06:00",
+    ]
+
+
+@respx.mock
+def test_create_appointment():
+    route = respx.post(f"{BASE}/calendars/events/appointments").respond(
+        json=fixture("create_appointment.json")
+    )
+
+    appointment_id = ghl.create_appointment("cal1", "abc123def456", "2026-11-16T10:00:00-06:00", "Intro call")
+
+    request = route.calls.last.request
+    assert_ghl_headers(request)
+    assert json.loads(request.content) == {
+        "calendarId": "cal1",
+        "locationId": "loc123",
+        "contactId": "abc123def456",
+        "startTime": "2026-11-16T10:00:00-06:00",
+        "title": "Intro call",
+        "appointmentStatus": "confirmed",
+    }
+    assert appointment_id == "0TkCdp9PfvLeWKYRRvIz"
+
+
+@respx.mock
+def test_move_opportunity_upserts_the_contacts_opportunity():
+    route = respx.post(f"{BASE}/opportunities/upsert").respond(201, json=fixture("upsert_opportunity.json"))
+
+    opportunity_id = ghl.move_opportunity("pipe1", "stage-booked", "abc123def456", "Intro call - Jane")
+
+    request = route.calls.last.request
+    assert_ghl_headers(request)
+    assert json.loads(request.content) == {
+        "pipelineId": "pipe1",
+        "locationId": "loc123",
+        "contactId": "abc123def456",
+        "pipelineStageId": "stage-booked",
+        "name": "Intro call - Jane",
+        "status": "open",
+    }
+    assert opportunity_id == "yWQobCRIhRguQtD2llvk"
+
+
+def test_booking_ids_prefer_install_row_over_env(monkeypatch):
+    monkeypatch.setattr(config, "GHL_CALENDAR_ID", "env-cal")
+    monkeypatch.setattr(config, "GHL_PIPELINE_ID", "env-pipe")
+    monkeypatch.setattr(config, "GHL_BOOKED_STAGE_ID", "env-stage")
+    assert ghl.booking_ids() == ("env-cal", "env-pipe", "env-stage")
+
+    monkeypatch.setattr(db, "get_install", lambda location_id: {"calendar_id": "inst-cal", "pipeline_id": None})
+    assert ghl.booking_ids() == ("inst-cal", "env-pipe", "env-stage")
+
+
+def test_booking_ids_missing_is_reported(monkeypatch):
+    monkeypatch.setattr(config, "GHL_CALENDAR_ID", "")
+
+    with pytest.raises(ghl.GHLError, match="GHL_CALENDAR_ID.*README Step 4"):
+        ghl.booking_ids()
