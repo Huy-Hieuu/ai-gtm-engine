@@ -215,3 +215,22 @@ def get_metrics(contact_id: str) -> dict | None:
         conn.row_factory = sqlite3.Row
         row = conn.execute("SELECT * FROM metrics WHERE contact_id = ?", (contact_id,)).fetchone()
         return dict(row) if row else None
+
+
+def dashboard_rows(limit: int) -> tuple[list[dict], list[dict]]:
+    """Every lead's metrics (for the totals), and the `limit` newest leads with their metrics."""
+    with closing(_connect()) as conn:
+        conn.row_factory = sqlite3.Row
+        totals = conn.execute(
+            "SELECT m.first_reply_seconds, COALESCE(m.qualified, 0) AS qualified, "
+            "COALESCE(m.booked, 0) AS booked "
+            "FROM leads l LEFT JOIN metrics m ON m.contact_id = l.contact_id"
+        ).fetchall()
+        recent = conn.execute(
+            "SELECT l.contact_id, l.first_name, l.state, l.need, l.budget, l.timing, l.created_at, "
+            "m.first_reply_seconds "
+            "FROM leads l LEFT JOIN metrics m ON m.contact_id = l.contact_id "
+            "ORDER BY l.created_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [dict(r) for r in totals], [dict(r) for r in recent]
