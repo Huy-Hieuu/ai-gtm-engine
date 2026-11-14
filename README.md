@@ -10,9 +10,11 @@ Python + FastAPI. GoHighLevel (GHL) owns the contacts, messages, calendars and p
 |------|------------|
 | `app/config.py` | The only place that reads environment variables (`.env`). |
 | `app/ghl.py` | The only GHL API client: one small function per endpoint. |
-| `app/db.py` | The only owner of the SQLite schema and queries (`events`, `installs`). |
+| `app/db.py` | The only owner of the SQLite schema and queries (`events`, `installs`, `leads`, `metrics`). |
 | `app/webhooks.py` | Webhook signature check and one handler per event type. |
-| `app/main.py` | FastAPI app (`GET /health`, `POST /webhook`, `GET /oauth/install`, `GET /oauth/callback`). |
+| `app/agent.py` | The SMS agent: the only owner of lead states and transitions (Step 3). |
+| `app/llm.py` | OpenAI calls: write one SMS, read a lead's answers as JSON (Step 3). |
+| `app/main.py` | FastAPI app (`GET /health`, `POST /webhook`, `GET /oauth/install`, `GET /oauth/callback`) and the nudge loop. |
 | `app/hello.py` | Step 1 CLI. |
 | `render.yaml` | Render free web service (Step 2). |
 | `tests/` | Tests against JSON fixtures from the docs; no test calls the real API. |
@@ -55,7 +57,7 @@ pip install -r requirements-dev.txt
 pytest -q
 ```
 
-Expected: `28 passed`.
+Expected: `38 passed`.
 
 ### 4. List contacts
 
@@ -102,7 +104,7 @@ How `POST /webhook` works:
 1. Checks the `X-GHL-Signature` header: an Ed25519 signature of the raw body, verified with GHL's public key from the [Webhook Integration Guide](https://marketplace.gohighlevel.com/docs/webhook/WebhookIntegrationGuide) (`app/config.py`, `GHL_WEBHOOK_PUBLIC_KEY`). Missing or wrong → `401`. The legacy RSA `X-WH-Signature` header was retired on 2026-09-01 and is not accepted.
 2. Event types without a handler → `200 {"status": "ignored"}`, nothing stored.
 3. Stores the event in the SQLite `events` table keyed by GHL's `webhookId`. Already there → `200 {"status": "duplicate"}` and no second handling. GHL retries any non-2xx or timed-out delivery up to 12 times, so the same event can arrive more than once.
-4. Answers `200 {"status": "accepted"}` at once, then runs the handler for that type after the response and sets `handled = 1`. For now the handlers only log.
+4. Answers `200 {"status": "accepted"}` at once, then runs the handler for that type after the response and sets `handled = 1`. The handlers log the event and pass it to the agent (Step 3).
 
 ### 1. Run locally (optional)
 
@@ -212,6 +214,123 @@ Expected: `2 passed`.
 | `webhook ignored id=... type=ContactUpdate` | An event without a handler is turned on in 3.3. Harmless; turn it off. |
 | `webhook failed id=...` with a traceback | A handler crashed; the event stays `handled = 0` and the traceback says why. |
 
+## Step 3 - AI agent
+
+Goal: a new lead gets a text within seconds, the agent asks three questions (need, budget, timing) one SMS at a time, and the lead ends up `QUALIFIED`, `NOT_A_FIT` or `HANDOFF`.
+
+The LLM only writes the words and reads the answers. `app/agent.py` owns the states and decides every move, so the agent never books, promises or tags anything on its own.
+
+```mermaid
+stateDiagram-v2
+    [*] --> NEW: ContactCreate
+    NEW --> QUALIFYING: greeting + Q1 (need)
+    QUALIFYING --> QUALIFYING: answer, next question
+    QUALIFYING --> QUALIFIED: need, budget, timing known
+    QUALIFIED --> BOOKED: Step 4
+    BOOKED --> DONE
+    QUALIFYING --> NOT_A_FIT: not a fit (close + tag not-a-fit)
+    QUALIFYING --> HANDOFF: asks for a person or unclear (tag handoff)
+    QUALIFYING --> NO_REPLY: no reply 1 h (nudge 1)
+    NO_REPLY --> NO_REPLY: 24 h (nudge 2, last)
+    NO_REPLY --> QUALIFYING: replies
+```
+
+- **NEW**: on `ContactCreate` the agent texts a greeting with the first question at once and stores `first_reply_seconds` (contact created in GHL → SMS sent). Contacts without a phone or with Do Not Disturb on are never texted.
+- **QUALIFYING**: each reply goes to the LLM, which returns `need`, `budget`, `timing`, `fit`, `wants_human`, `unsure` as JSON. The code keeps the answers and asks the first missing one.
+- **QUALIFIED**: `on_qualified(lead)` texts "I'll send you a few times shortly". Step 4 replaces it with real slots.
+- **NOT_A_FIT** / **HANDOFF**: one closing SMS, then the agent goes quiet for that contact and adds the tag `not-a-fit` or `handoff` in GHL, so a person can filter for them.
+- **NO_REPLY**: every minute the app checks for leads that have not answered: nudge 1 an hour after the last question, nudge 2 after 24 hours, each sent once. A reply puts the lead back to qualifying.
+- The same reply delivered twice (same GHL `messageId`) is answered once.
+
+Data (SQLite, `app/db.py`): `leads` (contact_id, state, need, budget, timing, last_msg_at, nudges) and `metrics` (first_reply_seconds, qualified, booked).
+
+### 1. Add the OpenAI key
+
+Create a key at [platform.openai.com/api-keys](https://platform.openai.com/api-keys). In `.env` (and in Render → your service → **Environment**):
+
+| Variable | Value |
+|----------|-------|
+| `OPENAI_API_KEY` | your key; never commit it |
+| `OPENAI_MODEL` | optional; default `gpt-6-luna`, OpenAI's small, cheap model |
+| `BUSINESS_DESCRIPTION` | optional; who the agent texts for, e.g. `a roofing company in Austin`. It shapes the questions and the fit check. |
+
+The agent also tags contacts ([`POST /contacts/{contactId}/tags`](https://marketplace.gohighlevel.com/docs/ghl/contacts/add-tags)), which needs the scope `contacts.write`. For the Private Integration Token from Step 1: **Settings → Private Integrations → your integration → Edit**, add `contacts.write`, save; the token stays the same. The OAuth app of Step 5 already asks for it.
+
+Save in Render; it redeploys. Check the tests still pass locally:
+
+```bash
+pytest -q tests/test_agent.py
+```
+
+Expected: `7 passed` (happy path, not a fit, handoff, nudges, duplicate reply, duplicate contact, Do Not Disturb), all with a fake LLM and fake GHL.
+
+### 2. Be the lead
+
+In the sandbox: **Contacts → Add Contact**, first name `Jane`, your own mobile number. Within a few seconds your phone gets the greeting. Answer it from the phone (your reply goes to the sandbox number). A typical exchange (the exact words come from the LLM and vary):
+
+```
+Agent: Hi Jane, thanks for reaching out! Happy to help. What do you need help with?
+You:   I need a new website for my bakery
+Agent: Thanks! Roughly what budget do you have in mind?
+You:   around 3k
+Agent: Got it. When would you like to get started?
+You:   next month
+Agent: Thanks Jane, sounds like a great fit. I'll text you a few meeting times shortly.
+```
+
+Render → **Logs** shows each move:
+
+```
+INFO app.agent: lead contact=<contactId> NEW -> QUALIFYING first_reply_seconds=3.8
+INFO app.agent: lead contact=<contactId> QUALIFYING -> QUALIFYING
+INFO app.agent: lead contact=<contactId> QUALIFYING -> QUALIFYING
+INFO app.agent: lead contact=<contactId> QUALIFYING -> QUALIFIED
+```
+
+It worked if the whole exchange shows in the contact's **Conversations** tab in GHL and `first_reply_seconds` is under 60.
+
+Try the side exits with a new contact each:
+
+| You text | Agent | Log ends with | In GHL |
+|----------|-------|---------------|--------|
+| `can I talk to a person` | says a teammate will text you | `-> HANDOFF` | tag `handoff` on the contact |
+| `not interested, wrong number` | thanks you and closes | `-> NOT_A_FIT` | tag `not-a-fit` |
+| nothing for an hour | a gentle nudge repeating the question | `nudge 1 sent` | |
+
+After `HANDOFF` or `NOT_A_FIT` further texts log `reply not for the agent contact=... state=HANDOFF` and get no automatic answer: a person owns the chat now.
+
+### 3. See the state in the database
+
+Where the app runs (locally, or a Render Shell on a paid instance):
+
+```bash
+sqlite3 speed_to_lead.db "SELECT contact_id, state, need, budget, timing, nudges FROM leads; SELECT * FROM metrics;"
+```
+
+Expected for the exchange above:
+
+```
+<contactId>|QUALIFIED|new website for a bakery|$3k|next month|0
+<contactId>|3.8|1|0
+```
+
+The metrics columns are `contact_id|first_reply_seconds|qualified|booked`.
+
+### Free tier caveats
+
+- **Nudges need the app awake.** A sleeping free service runs no loop, so a nudge due while it sleeps goes out on the next wake-up (any webhook or request), not on time. A paid instance, or an uptime pinger on `/health`, keeps it on time.
+- **The database resets on every deploy**, so leads mid-conversation are forgotten: their next reply logs `reply not for the agent contact=... state=None`.
+
+### If it fails
+
+| What you see | Fix |
+|--------------|-----|
+| `webhook failed id=...` with `OPENAI_API_KEY is not set` | Add the key in Render → Environment (step 1). |
+| `webhook failed id=...` with `OpenAI /v1/responses failed (404 ...)` | `OPENAI_MODEL` is wrong or your account has no access to it; remove it to use the default. |
+| `webhook failed id=...` with `GHL rejected the token (401 on /contacts/.../tags)` | The token lacks `contacts.write` (step 1). |
+| `lead skipped contact=...: no phone or Do Not Disturb` | Give the contact a phone and turn DND off, then add a new contact. |
+| No greeting and no `app.agent` log line | The Step 2 webhook is not arriving; see Step 2's "If it fails". |
+
 ## Step 5 - OAuth app
 
 Goal: a client installs the app into their sub-account with one click, and the app keeps a working token for it without anyone copying tokens around. The Private Integration Token from Step 1 stays as the fallback for a location without an install.
@@ -234,6 +353,7 @@ Reuse the app from Step 2 (or create one: [marketplace.gohighlevel.com](https://
    | Scope | Used by |
    |-------|---------|
    | `contacts.readonly` | list contacts, `ContactCreate` webhook |
+   | `contacts.write` | tag contacts `handoff` / `not-a-fit` (Step 3) |
    | `conversations/message.readonly` | `InboundMessage` webhook |
    | `conversations/message.write` | send SMS |
    | `calendars.readonly` | free slots (Step 4) |

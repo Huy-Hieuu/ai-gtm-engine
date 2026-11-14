@@ -1,0 +1,27 @@
+{
+  "id": "resp_686eef60237881a2bd1180bb8b13de430e34c516d176ff86",
+  "object": "response",
+  "status": "completed",
+  "model": "gpt-6-luna",
+  "output": [
+    {
+      "id": "rs_686eef60237881a2bd1180bb8b13de43",
+      "type": "reasoning",
+      "summary": []
+    },
+    {
+      "id": "msg_686eef60d3e081a29283bdcbc4322fd90e34c516d176ff86",
+      "type": "message",
+      "status": "completed",
+      "role": "assistant",
+      "content": [
+        {
+          "type": "output_text",
+          "annotations": [],
+          "logprobs": [],
+          "text": "{\"need\":\"new website\",\"budget\":\"about $3k\",\"timing\":null,\"fit\":true,\"wants_human\":false,\"unsure\":false}"
+        }
+      ]
+    }
+  ]
+}

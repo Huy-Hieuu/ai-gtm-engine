@@ -21,6 +21,14 @@ APP_ENCRYPTION_KEY = os.getenv("APP_ENCRYPTION_KEY", "")
 # SQLite file. On Render's free tier the disk is temporary: the file resets on every deploy.
 DATABASE_PATH = os.getenv("DATABASE_PATH", "speed_to_lead.db")
 
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+# Small, cheap model for short SMS: https://developers.openai.com/api/docs/models/gpt-6-luna
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-6-luna")
+# Who the agent texts for; the LLM uses it to write replies and judge fit.
+BUSINESS_DESCRIPTION = os.getenv(
+    "BUSINESS_DESCRIPTION", "a marketing agency that builds websites and runs ads for local businesses"
+)
+
 # Ed25519 public key GHL signs webhooks with (`X-GHL-Signature` header), copied from
 # https://marketplace.gohighlevel.com/docs/webhook/WebhookIntegrationGuide
 GHL_WEBHOOK_PUBLIC_KEY = """-----BEGIN PUBLIC KEY-----

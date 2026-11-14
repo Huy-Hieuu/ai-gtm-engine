@@ -11,7 +11,7 @@ import logging
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.serialization import load_pem_public_key
 
-from app import config, db
+from app import agent, config, db
 
 log = logging.getLogger("app.webhooks")
 
@@ -42,6 +42,7 @@ def on_contact_create(event: dict) -> None:
         "ContactCreate contact=%s name=%r location=%s",
         event.get("id"), event.get("name"), event.get("locationId"),
     )
+    agent.on_contact_create(event)
 
 
 # https://marketplace.gohighlevel.com/docs/webhook/InboundMessage
@@ -50,6 +51,7 @@ def on_inbound_message(event: dict) -> None:
         "InboundMessage contact=%s channel=%s body=%r",
         event.get("contactId"), event.get("messageType"), event.get("body"),
     )
+    agent.on_inbound(event)
 
 
 HANDLERS = {
