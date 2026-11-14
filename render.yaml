@@ -1,0 +1,16 @@
+# One free Render web service. Free-tier disk is temporary: the SQLite file resets on every deploy.
+services:
+  - type: web
+    name: ghl-speed-to-lead
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.11"
+      - key: GHL_PRIVATE_TOKEN
+        sync: false
+      - key: GHL_LOCATION_ID
+        sync: false
