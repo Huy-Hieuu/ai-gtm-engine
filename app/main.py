@@ -1,12 +1,13 @@
 import asyncio
 import json
 import logging
+import secrets
 from contextlib import asynccontextmanager
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
-from fastapi.responses import RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 
-from app import agent, db, ghl, webhooks
+from app import agent, config, dashboard, db, ghl, webhooks
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("app.main")
@@ -83,3 +84,13 @@ async def webhook(request: Request, background: BackgroundTasks) -> dict:
     log.info("webhook received id=%s type=%s", webhook_id, event_type)
     background.add_task(webhooks.handle, webhook_id, event)
     return {"status": "accepted"}
+
+
+@app.get("/dashboard", response_class=HTMLResponse)
+def dashboard_page(token: str = "") -> str:
+    """Leads, reply speed, qualified and booked rates. Needs `?token=` equal to DASHBOARD_TOKEN."""
+    if not config.DASHBOARD_TOKEN:
+        raise HTTPException(status_code=503, detail="DASHBOARD_TOKEN is not set")
+    if not secrets.compare_digest(token.encode(), config.DASHBOARD_TOKEN.encode()):
+        raise HTTPException(status_code=401, detail="invalid token")
+    return dashboard.render()

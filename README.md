@@ -1,8 +1,163 @@
 # AI Speed-to-Lead Agent for GoHighLevel
 
-New lead in GoHighLevel → AI texts back in under 60 seconds → qualifies the lead by SMS → books a meeting → moves the pipeline stage.
+A new GoHighLevel lead gets an AI text within seconds, is qualified by SMS, books a meeting on your calendar and lands in the **Booked** pipeline stage, with no one touching it.
 
-Python + FastAPI. GoHighLevel (GHL) owns the contacts, messages, calendars and pipeline; this app only listens, decides and calls the [GHL API v2](https://marketplace.gohighlevel.com/docs/). Built step by step; each step's section below is a guide you can run yourself.
+Python + FastAPI. GoHighLevel (GHL) owns the contacts, messages, calendars and pipeline; this app only listens, decides and calls the [GHL API v2](https://marketplace.gohighlevel.com/docs/). Built in steps; each step's section below is a guide you can run yourself.
+
+## Architecture
+
+```mermaid
+flowchart LR
+    lead(["Lead<br/>form · SMS · chat"])
+    subgraph ghl["GoHighLevel sub-account"]
+        contacts["Contacts + Forms"]
+        conv["Conversations (SMS)"]
+        cal["Calendars"]
+        opp["Opportunities (pipeline)"]
+        hooks["Webhooks out<br/>ContactCreate · InboundMessage"]
+    end
+    subgraph app["This app (FastAPI on Render)"]
+        wh["POST /webhook<br/>verify Ed25519 signature"]
+        bg["Background task<br/>+ nudge loop"]
+        agent["Lead agent<br/>(state machine)"]
+        client["GHL API client"]
+        db[("SQLite<br/>events · installs · leads · metrics")]
+        dash["GET /dashboard"]
+    end
+    llm["LLM (OpenAI)<br/>write reply · extract answers"]
+
+    lead --> contacts
+    lead <--> conv
+    contacts --> hooks
+    conv --> hooks
+    hooks -- event --> wh
+    wh --> bg --> agent
+    agent <--> llm
+    agent --> client
+    agent <--> db
+    db --> dash
+    client -- "API v2 calls" --> conv
+    client --> cal
+    client --> opp
+    client --> contacts
+```
+
+GHL owns the data; the app keeps only what its state machine and dashboard need. The webhook answers `200` at once and the work runs after the response, so GHL never waits on the LLM.
+
+## Lead flow
+
+```mermaid
+sequenceDiagram
+    participant L as Lead
+    participant G as GHL
+    participant A as This app
+    participant M as LLM
+    L->>G: 1. fills form / is added
+    G->>A: 2. webhook ContactCreate
+    A-->>G: 3. 200 at once, work continues in background
+    A->>M: 4. write first message
+    M-->>A: greeting + Q1 (need)
+    A->>G: 5. send SMS (Conversations API)
+    G->>L: 6. SMS within seconds
+    loop until need, budget, timing known
+        L->>G: 7. replies
+        G->>A: 8. webhook InboundMessage
+        A->>M: 9. extract answers, write next question
+        A->>G: next question by SMS
+    end
+    A->>G: 10. free slots, offer 2-3 by SMS, book the picked one
+    A->>G: 11. opportunity to Booked stage, tag booked
+    A->>G: 12. confirmation SMS
+    G->>L: confirmation
+```
+
+## Qualify state machine
+
+The LLM writes the words and reads the answers. `app/agent.py` owns the states and decides every move, so the agent never books, promises or tags anything on its own.
+
+```mermaid
+stateDiagram-v2
+    [*] --> NEW: ContactCreate
+    NEW --> QUALIFYING: greeting + Q1 (need)
+    QUALIFYING --> QUALIFYING: answer, next question
+    QUALIFYING --> QUALIFIED: need, budget, timing known (offer 2-3 slots)
+    QUALIFIED --> BOOKED: pick + appointment created
+    BOOKED --> DONE: stage Booked, tag booked, confirmation SMS
+    QUALIFYING --> NOT_A_FIT: not a fit (polite close, tag not-a-fit)
+    QUALIFYING --> HANDOFF: asks for a person or unclear (tag handoff)
+    QUALIFIED --> HANDOFF: no free slots, asks for a person, or no clear pick twice
+    QUALIFYING --> NO_REPLY: no reply 1 h (nudge 1)
+    NO_REPLY --> NO_REPLY: 24 h (nudge 2, last)
+    NO_REPLY --> QUALIFYING: replies
+```
+
+## Features
+
+- **Instant first text.** `ContactCreate` → greeting + first question by SMS; the time from contact created to SMS sent is stored per lead (`first_reply_seconds`).
+- **SMS qualifying.** Need, budget and timing, one question at a time; the LLM returns the answers as JSON and the code decides the next step.
+- **Real booking.** Offers up to 3 free times from a GHL calendar, understands the pick in the lead's own words, books it, and handles a slot taken in the meantime.
+- **Pipeline + tags.** Moves the opportunity to **Booked**; tags `booked`, `handoff` or `not-a-fit` so a person can filter in GHL.
+- **Nudges.** One follow-up after 1 hour and one after 24 hours without a reply.
+- **Safe webhooks.** Ed25519 signature check, duplicate deliveries skipped by `webhookId`, duplicate replies by `messageId`; contacts with Do Not Disturb are never texted.
+- **Installable.** GHL OAuth app install flow, tokens encrypted at rest, refresh before expiry and one retry on `401`; a Private Integration Token works for a single account.
+- **Dashboard.** Leads, median and p90 first-reply time, % qualified, % booked, last 20 leads (Step 6).
+- **Tested offline.** Every GHL and OpenAI call is tested against the documented example responses; no test calls a real API.
+
+## Stack
+
+Python 3.11 · FastAPI · httpx · SQLite · `cryptography` (Ed25519 webhook check, Fernet token encryption) · OpenAI Responses API · GoHighLevel API v2 · Render (free web service) · pytest + respx · GitHub Actions CI.
+
+## Run it
+
+```bash
+git clone https://github.com/Huy-Hieuu/ghl-speed-to-lead.git
+cd ghl-speed-to-lead
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements-dev.txt
+pytest -q                        # 56 passed, no keys needed
+cp .env.example .env             # fill in from "What you need"
+uvicorn app.main:app --reload
+```
+
+Then `curl localhost:8000/health` → `{"status":"ok"}`, and with `DASHBOARD_TOKEN` set, open `http://localhost:8000/dashboard?token=<DASHBOARD_TOKEN>`.
+
+GHL can only reach a public URL, so for real leads deploy it: [Render](https://dashboard.render.com) → **New → Blueprint** → this repo. `render.yaml` creates the free web service, asks for the secrets and generates `DASHBOARD_TOKEN`. Steps 1-6 below walk through every setting.
+
+## What you need
+
+No passwords go in this repo; every secret lives in `.env` (git-ignored) or in Render → your service → **Environment**.
+
+| What | Where to get it | Env var |
+|------|-----------------|---------|
+| GoHighLevel agency account with a sandbox sub-account | [gohighlevel.com](https://www.gohighlevel.com) (trial or developer sandbox) | |
+| An SMS number in that sub-account | GHL → **Settings → Phone Numbers** | |
+| Private Integration Token | GHL sub-account → **Settings → Private Integrations** (Step 1) | `GHL_PRIVATE_TOKEN` |
+| Location (sub-account) id | GHL app URL, the part after `/location/` (Step 1) | `GHL_LOCATION_ID` |
+| Calendar, pipeline and Booked stage ids | GHL API `GET /calendars`, `GET /opportunities/pipelines` (Step 4.3) | `GHL_CALENDAR_ID`, `GHL_PIPELINE_ID`, `GHL_BOOKED_STAGE_ID` |
+| GHL Marketplace developer account + private app (webhooks and OAuth) | [marketplace.gohighlevel.com](https://marketplace.gohighlevel.com) → **My Apps** (Steps 2.3, 5.1) | `GHL_CLIENT_ID`, `GHL_CLIENT_SECRET`, `GHL_REDIRECT_URI` |
+| Token encryption key | `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"` (Step 5.2) | `APP_ENCRYPTION_KEY` |
+| OpenAI API key | [platform.openai.com/api-keys](https://platform.openai.com/api-keys) (Step 3.1) | `OPENAI_API_KEY` |
+| OpenAI model (optional) | default `gpt-6-luna` | `OPENAI_MODEL` |
+| Business description (optional) | your own words, e.g. `a roofing company in Austin` | `BUSINESS_DESCRIPTION` |
+| Dashboard token | any long random string; Render generates one from `render.yaml` (Step 6) | `DASHBOARD_TOKEN` |
+| Database file (optional) | default `speed_to_lead.db` | `DATABASE_PATH` |
+| GHL API base (optional) | default `https://services.leadconnectorhq.com`; leave it | `GHL_API_BASE` |
+| Render account linked to GitHub | [dashboard.render.com](https://dashboard.render.com) (Step 2.2) | |
+
+## Results
+
+> **To fill in** from the sandbox run: open `/dashboard` after the test leads and copy the numbers. Replace every `TO FILL`; until then nothing here is a measured result.
+
+| Metric | Sandbox result |
+|--------|----------------|
+| Test leads | TO FILL |
+| Median first reply (contact created → SMS sent) | TO FILL s |
+| p90 first reply | TO FILL s |
+| Qualified | TO FILL % |
+| Booked | TO FILL % |
+| Run date, hosting | TO FILL (e.g. date, Render free tier) |
+
+Screenshot of the dashboard: TO FILL. Demo video: TO FILL (script in [`docs/loom-script.md`](docs/loom-script.md)).
 
 ## Layout
 
@@ -14,9 +169,11 @@ Python + FastAPI. GoHighLevel (GHL) owns the contacts, messages, calendars and p
 | `app/webhooks.py` | Webhook signature check and one handler per event type. |
 | `app/agent.py` | The SMS agent: the only owner of lead states and transitions (Step 3). |
 | `app/llm.py` | OpenAI calls: write one SMS, read a lead's answers as JSON (Step 3). |
-| `app/main.py` | FastAPI app (`GET /health`, `POST /webhook`, `GET /oauth/install`, `GET /oauth/callback`) and the nudge loop. |
+| `app/dashboard.py` | The dashboard page: totals and the last 20 leads as HTML (Step 6). |
+| `app/main.py` | FastAPI app (`GET /health`, `POST /webhook`, `GET /oauth/install`, `GET /oauth/callback`, `GET /dashboard`) and the nudge loop. |
 | `app/hello.py` | Step 1 CLI. |
 | `render.yaml` | Render free web service (Step 2). |
+| `docs/loom-script.md` | 2-3 minute demo video script (Step 6). |
 | `tests/` | Tests against JSON fixtures from the docs; no test calls the real API. |
 
 ## Step 1 - Hello API
@@ -57,7 +214,7 @@ pip install -r requirements-dev.txt
 pytest -q
 ```
 
-Expected: `49 passed`.
+Expected: `56 passed`.
 
 ### 4. List contacts
 
@@ -419,7 +576,7 @@ Save; Render redeploys. Locally, delete a `speed_to_lead.db` made before this st
 pytest -q
 ```
 
-Expected: `49 passed`. The booking cases (offer and pick, booking + stage + confirmation, no free slots, slot taken at booking time, unclear pick) are in `tests/test_agent.py`; the three endpoints against their doc examples in `tests/test_ghl.py`.
+Expected: `56 passed`. The booking cases (offer and pick, booking + stage + confirmation, no free slots, slot taken at booking time, unclear pick) are in `tests/test_agent.py`; the three endpoints against their doc examples in `tests/test_ghl.py`.
 
 ### 5. Be the lead
 
@@ -561,3 +718,49 @@ On the free tier the database resets on every deploy or restart (Step 2), so the
 | Callback → `502` with `GHL /oauth/token failed (400 ...)` | The code is single-use and short-lived: start again from `/oauth/install` instead of reloading the callback. Also check the client secret. |
 | Callback → `500 Internal Server Error`, log says `APP_ENCRYPTION_KEY is not set` or `Fernet key must be 32 url-safe base64-encoded bytes` | Set `APP_ENCRYPTION_KEY` to the exact line from 2. |
 | `GHL rejected the token (401 ...)` after a refresh | The install was removed in GHL or the scope is missing: reinstall from `/oauth/install`. |
+
+## Step 6 - Dashboard
+
+Goal: one page with the numbers a client asks about: how many leads, how fast the first text went out, how many qualified and booked.
+
+`GET /dashboard?token=<DASHBOARD_TOKEN>` renders one HTML page from the `leads` and `metrics` tables (`app/dashboard.py`, `db.dashboard_rows`):
+
+| Number | How it is counted |
+|--------|-------------------|
+| Leads | rows in `leads`: every contact the agent texted (contacts skipped for no phone or Do Not Disturb are not leads) |
+| Median / p90 first reply | `first_reply_seconds` over all leads: contact created in GHL → first SMS sent. p90 is the nearest-rank 90th percentile. |
+| Qualified | % of leads that reached `QUALIFIED`: need, budget and timing known (`metrics.qualified`; booked leads count too) |
+| Booked | % of leads with an appointment booked (`metrics.booked`) |
+| Last 20 leads | newest first: created time, first name, contact id, state, answers, first reply time |
+
+No `DASHBOARD_TOKEN` set → `503`, so a fresh deploy never shows leads to anyone. A missing or wrong token → `401`.
+
+### 1. Get the token
+
+On Render the blueprint generates `DASHBOARD_TOKEN`: Render → your service → **Environment** → reveal it. For a service created before this step, add it there yourself (any long random string, e.g. `python -c "import secrets; print(secrets.token_urlsafe(24))"`) and save; Render redeploys. Locally, put it in `.env`.
+
+### 2. Open it
+
+```
+https://<app>.onrender.com/dashboard?token=<DASHBOARD_TOKEN>
+```
+
+Expected: five number cards (leads, median first reply, p90 first reply, qualified, booked) and a table of the last 20 leads. With no leads yet the numbers show `-` and the table says `No leads yet.`
+
+It worked if, after the Step 4 test lead, the table shows that contact id with state `DONE` and the same `first_reply_seconds` as the `NEW -> QUALIFYING` log line.
+
+The token sits in the URL, so it shows in Render's request log; treat the URL like a password and rotate the token (edit it in **Environment**) if it leaks. On the free tier the numbers reset with the database on every deploy (Step 2).
+
+```bash
+pytest -q tests/test_dashboard.py
+```
+
+Expected: `7 passed`.
+
+### If it fails
+
+| What you see | Fix |
+|--------------|-----|
+| `{"detail":"DASHBOARD_TOKEN is not set"}` (503) | Set it on this service (1). |
+| `{"detail":"invalid token"}` (401) | The `token=` value differs from `DASHBOARD_TOKEN`; copy it again. |
+| Numbers dropped to `0` / `-` | The service redeployed or restarted and the free-tier database reset (Step 2). |
