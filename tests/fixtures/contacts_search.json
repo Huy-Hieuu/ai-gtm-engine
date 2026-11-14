@@ -1,0 +1,24 @@
+{
+  "contacts": [
+    {
+      "id": "102goXVW3lIExEQPOnd3",
+      "locationId": "502goXVW3lIExEQPOnd3",
+      "contactName": "john doe",
+      "firstName": "john",
+      "lastName": "doe",
+      "firstNameLowerCase": "john",
+      "lastNameLowerCase": "doe",
+      "email": "john@example.com",
+      "phone": "+123456789",
+      "phoneLabel": "Mobile",
+      "source": "Website",
+      "type": "lead",
+      "dnd": false,
+      "tags": ["tag-1", "tag-2"],
+      "dateAdded": "2024-06-06T18:54:57.221Z",
+      "dateUpdated": "2024-06-06T18:54:57.221Z",
+      "searchAfter": [1730700000000, "102goXVW3lIExEQPOnd3"]
+    }
+  ],
+  "total": 1
+}
